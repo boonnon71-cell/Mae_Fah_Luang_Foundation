@@ -933,10 +933,25 @@
 
         // สถานที่จัดเก็บสต๊อก (คลังที่มีสต๊อกของตัวเอง)
         const LOCATIONS = ['ห้องอาหาร', 'มุมสบาย'];
-        // ปลายทางที่สามารถเบิกสินค้าไปใช้ (ใช้บันทึกตอนสินค้าออก)
+        // ปลายทางที่สามารถเบิกสินค้าไปใช้ (ใช้บันทึกตอนสินค้าออก) พร้อมรหัสสถานที่
         const DESTINATIONS = ['มุมสบาย', 'ห้องอาหาร', 'ครัวตำหนัก', 'ครัวต้นน้ำ'];
+        const DEST_CODES = {
+            'ครัวตำหนัก': '01',
+            'ห้องอาหาร': '02',
+            'มุมสบาย': '03',
+            'ครัวต้นน้ำ': '04'
+        };
         // หน่วยนับที่เลือกได้
         const UNITS = ['กก.', 'แพ็ค', 'ชิ้น', 'ลิตร', 'ขวด', 'กล่อง', 'ถุง'];
+        // หมวดหมู่สินค้า (รหัสนำหน้า -> ชื่อหมวดหมู่) ขยายเพิ่มได้ในอนาคต
+        const DEFAULT_CATEGORIES = {
+            P: 'ผักและผลไม้สด',
+            B: 'น้ำมันปรุงอาหาร',
+            C: 'น้ำดื่มดอยตุง',
+            D: 'กาแฟ',
+            E: 'นมและผลิตภัณฑ์นม'
+        };
+        let CATEGORIES = {};
 
         let currentUser = null;
         let currentPage = 'dashboard';
@@ -945,6 +960,11 @@
         let transactions = [];
         let requests = [];
         let purchaseOrders = [];
+        let refCounters = {
+            O: 0,
+            P: 0
+        }; // ตัวนับรหัสอ้างอิง คำขอเบิก(O) / ใบสั่งสินค้า(P)
+        let poCounters = {}; // ตัวนับรหัสใบสั่งสินค้า (A001...) แยกตามสถานที่
 
         function loadData() {
             try {
@@ -956,7 +976,18 @@
                 if (r) requests = JSON.parse(r);
                 const po = localStorage.getItem('doitung_purchaseOrders');
                 if (po) purchaseOrders = JSON.parse(po);
+                const c = localStorage.getItem('doitung_categories');
+                if (c) CATEGORIES = JSON.parse(c);
+                const rc = localStorage.getItem('doitung_refCounters');
+                if (rc) refCounters = JSON.parse(rc);
+                const pc = localStorage.getItem('doitung_poCounters');
+                if (pc) poCounters = JSON.parse(pc);
             } catch (e) {}
+            if (!Object.keys(CATEGORIES).length) {
+                CATEGORIES = {...DEFAULT_CATEGORIES
+                };
+                saveCategories();
+            }
             if (!products.length) {
                 products = [{
                     id: 'P001',
@@ -987,21 +1018,21 @@
                     stock: 20,
                     minStock: 5
                 }, {
-                    id: 'P005',
+                    id: 'B001',
                     name: 'น้ำมันพืช',
                     unit: 'ลิตร',
                     location: 'ห้องอาหาร',
                     stock: 15,
                     minStock: 5
                 }, {
-                    id: 'P006',
+                    id: 'D001',
                     name: 'กาแฟคั่วบด',
                     unit: 'กก.',
                     location: 'มุมสบาย',
                     stock: 12,
                     minStock: 3
                 }, {
-                    id: 'P007',
+                    id: 'E001',
                     name: 'นมสด',
                     unit: 'ขวด',
                     location: 'มุมสบาย',
@@ -1010,6 +1041,55 @@
                 }, ];
                 saveProducts();
             }
+        }
+
+        function saveCategories() {
+            localStorage.setItem('doitung_categories', JSON.stringify(CATEGORIES));
+        }
+
+        function saveRefCounters() {
+            localStorage.setItem('doitung_refCounters', JSON.stringify(refCounters));
+        }
+
+        function savePoCounters() {
+            localStorage.setItem('doitung_poCounters', JSON.stringify(poCounters));
+        }
+
+        // แยกรหัสสินค้าออกเป็น {prefix, num} เช่น 'P012' -> {prefix:'P', num:12}
+        function parseProductId(id) {
+            const m = /^([A-Z]+)(\d+)$/.exec(id || '');
+            return m ? {
+                prefix: m[1],
+                num: parseInt(m[2], 10)
+            } : null;
+        }
+
+        // สร้างรหัสสินค้าถัดไปในหมวดหมู่ที่กำหนด เช่น เลือกหมวด P -> คืนค่า 'P005'
+        function genProductId(prefix) {
+            let max = 0;
+            products.forEach(p => {
+                const parsed = parseProductId(p.id);
+                if (parsed && parsed.prefix === prefix) max = Math.max(max, parsed.num);
+            });
+            return prefix + String(max + 1).padStart(3, '0');
+        }
+
+        // สร้างรหัสอ้างอิงไม่ซ้ำกัน เช่น #00001-O-01WEQ (typeChar: 'O'=คำขอเบิก, 'P'=ใบสั่งสินค้า)
+        function genRefCode(typeChar, locCode) {
+            refCounters[typeChar] = (refCounters[typeChar] || 0) + 1;
+            saveRefCounters();
+            const seq = String(refCounters[typeChar]).padStart(5, '0');
+            const letters = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ';
+            let rand = '';
+            for (let i = 0; i < 3; i++) rand += letters[Math.floor(Math.random() * letters.length)];
+            return `#${seq}-${typeChar}-${locCode || '00'}${rand}`;
+        }
+
+        // สร้างรหัสใบสั่งสินค้า A001, A002... แยกรันตามสถานที่
+        function genPoCode(location) {
+            poCounters[location] = (poCounters[location] || 0) + 1;
+            savePoCounters();
+            return 'A' + String(poCounters[location]).padStart(3, '0');
         }
 
         function saveProducts() {
@@ -1224,12 +1304,13 @@
             <div class="card">
                 <div class="cardTitle">สต๊อกสินค้าปัจจุบัน — ${currentLocation}</div>
                 <div class="tableWrap"><table>
-                    <thead><tr><th>สินค้า</th><th>หน่วย</th><th>คงเหลือ</th><th>สถานะ</th></tr></thead>
+                    <thead><tr><th>รหัส</th><th>สินค้า</th><th>หน่วย</th><th>คงเหลือ</th><th>สถานะ</th></tr></thead>
                     <tbody>${scoped.length?scoped.map(p=>`
                         <tr>
+                            <td style="color:var(--muted);font-size:12px"><b>${p.id}</b></td>
                             <td>${p.name}</td><td>${p.unit}</td><td><b>${p.stock}</b></td>
                             <td>${p.stock<=p.minStock?'<span class="badge badge-low">⚠ ใกล้หมด</span>':'<span class="badge badge-approved">✓ ปกติ</span>'}</td>
-                        </tr>`).join(''):'<tr><td colspan="4"><div class="emptyState">ยังไม่มีสินค้าในสถานที่นี้</div></td></tr>'}
+                        </tr>`).join(''):'<tr><td colspan="5"><div class="emptyState">ยังไม่มีสินค้าในสถานที่นี้</div></td></tr>'}
                     </tbody>
                 </table></div>
             </div>`;
@@ -1240,21 +1321,30 @@
             <div class="pageTitle">จัดการสินค้า</div>
             <div class="pageSub">เพิ่ม แก้ไข หรือลบรายการสินค้า — สถานที่: <b>${currentLocation}</b></div>
             ${locationSwitcher()}
-            <div style="margin-bottom:16px"><button class="btn btn-primary" onclick="openAddProduct()">+ เพิ่มสินค้า</button></div>
+            <div style="margin-bottom:16px;display:flex;gap:8px">
+                <button class="btn btn-primary" onclick="openAddProduct()">+ เพิ่มสินค้า</button>
+                <button class="btn btn-outline" onclick="openAddCategory()">+ เพิ่มหมวดหมู่</button>
+            </div>
             <div class="card">
                 <div class="tableWrap"><table>
-                    <thead><tr><th>รหัส</th><th>ชื่อสินค้า</th><th>สถานที่</th><th>หน่วย</th><th>สต๊อก</th><th>สต๊อกขั้นต่ำ</th><th>จัดการ</th></tr></thead>
+                    <thead><tr><th>รหัส</th><th>หมวดหมู่</th><th>ชื่อสินค้า</th><th>สถานที่</th><th>หน่วย</th><th>สต๊อก</th><th>สต๊อกขั้นต่ำ</th><th>จัดการ</th></tr></thead>
                     <tbody id="productTable">${renderProductRows()}</tbody>
                 </table></div>
             </div>`;
         }
 
+        function categoryNameOf(id) {
+            const parsed = parseProductId(id);
+            return parsed && CATEGORIES[parsed.prefix] ? CATEGORIES[parsed.prefix] : '-';
+        }
+
         function renderProductRows() {
             const scoped = productsAt(currentLocation);
-            if (!scoped.length) return '<tr><td colspan="7"><div class="emptyState">ยังไม่มีสินค้าในสถานที่นี้</div></td></tr>';
+            if (!scoped.length) return '<tr><td colspan="8"><div class="emptyState">ยังไม่มีสินค้าในสถานที่นี้</div></td></tr>';
             return scoped.map(p=>`
                 <tr>
-                    <td style="color:var(--muted);font-size:12px">${p.id}</td>
+                    <td style="color:var(--muted);font-size:12px"><b>${p.id}</b></td>
+                    <td style="font-size:12px">${categoryNameOf(p.id)}</td>
                     <td><b>${p.name}</b></td>
                     <td><span class="badge badge-loc">${p.location}</span></td>
                     <td>${p.unit}</td><td><b>${p.stock}</b></td><td>${p.minStock}</td>
@@ -1265,10 +1355,39 @@
                 </tr>`).join('');
         }
 
+        function openAddCategory() {
+            openModal('เพิ่มหมวดหมู่สินค้าใหม่', `
+                <div class="formRow">
+                    <div><label class="fLabel">รหัสนำหน้า (ตัวอักษร A-Z)</label><input class="fInput" id="catPrefix" placeholder="เช่น F" maxlength="2" style="text-transform:uppercase"></div>
+                    <div><label class="fLabel">ชื่อหมวดหมู่</label><input class="fInput" id="catName" placeholder="เช่น เครื่องปรุง"></div>
+                </div>`,
+                [{label:'บันทึก', cls:'btn-primary', fn:()=>{
+                    const prefix = document.getElementById('catPrefix').value.trim().toUpperCase();
+                    const name   = document.getElementById('catName').value.trim();
+                    if (!/^[A-Z]{1,2}$/.test(prefix)){ alert('รหัสนำหน้าต้องเป็นตัวอักษร A-Z 1-2 ตัว'); return; }
+                    if (!name){ alert('กรุณากรอกชื่อหมวดหมู่'); return; }
+                    if (CATEGORIES[prefix]){ alert('รหัสนำหน้านี้มีหมวดหมู่อยู่แล้ว: '+CATEGORIES[prefix]); return; }
+                    CATEGORIES[prefix] = name;
+                    saveCategories(); closeModal(); showPage('products');
+                }},
+                {label:'ยกเลิก', cls:'btn-outline', fn:closeModal}]);
+        }
+
         function openAddProduct() {
+            const prefixes = Object.keys(CATEGORIES);
+            const firstPrefix = prefixes[0] || '';
             openModal('เพิ่มสินค้าใหม่', `
                 <div class="formRow">
-                    <div><label class="fLabel">รหัสสินค้า</label><input class="fInput" id="pId" placeholder="P0XX"></div>
+                    <div><label class="fLabel">หมวดหมู่สินค้า</label>
+                        <select class="fSelect" id="pCategory" onchange="document.getElementById('pIdPreview').textContent = genProductId(this.value)">
+                            ${prefixes.map(pf=>`<option value="${pf}">${pf} - ${CATEGORIES[pf]}</option>`).join('')}
+                        </select>
+                    </div>
+                    <div><label class="fLabel">รหัสสินค้า (สร้างอัตโนมัติ)</label>
+                        <div class="fInput" style="background:#f0ece0;font-weight:700" id="pIdPreview">${genProductId(firstPrefix)}</div>
+                    </div>
+                </div>
+                <div class="formRow one">
                     <div><label class="fLabel">ชื่อสินค้า</label><input class="fInput" id="pName" placeholder="ชื่อสินค้า"></div>
                 </div>
                 <div class="formRow">
@@ -1284,14 +1403,16 @@
                     <div><label class="fLabel">สต๊อกขั้นต่ำ (แจ้งเตือน)</label><input class="fInput" type="number" id="pMin" value="5"></div>
                 </div>`,
                 [{label:'บันทึก', cls:'btn-primary', fn:()=>{
-                    const id       = document.getElementById('pId').value.trim();
+                    const prefix   = document.getElementById('pCategory').value;
+                    const id       = genProductId(prefix);
                     const name     = document.getElementById('pName').value.trim();
                     const location = document.getElementById('pLocation').value;
                     const unit     = document.getElementById('pUnit').value;
                     const stock    = parseInt(document.getElementById('pStock').value)||0;
                     const min      = parseInt(document.getElementById('pMin').value)||5;
-                    if (!id||!name){ alert('กรุณากรอกข้อมูลให้ครบ'); return; }
-                    if (products.find(p=>p.id===id)){ alert('รหัสสินค้าซ้ำ'); return; }
+                    if (!prefix){ alert('กรุณาเพิ่มหมวดหมู่ก่อน'); return; }
+                    if (!name){ alert('กรุณากรอกชื่อสินค้า'); return; }
+                    if (products.find(p=>p.id===id)){ alert('รหัสสินค้าซ้ำ กรุณาลองใหม่'); return; }
                     products.push({id,name,unit,location,stock,minStock:min});
                     saveProducts(); closeModal(); showPage('products');
                 }},
@@ -1302,7 +1423,7 @@
             const p = products.find(x=>x.id===id); if (!p) return;
             openModal('แก้ไขสินค้า', `
                 <div class="formRow">
-                    <div><label class="fLabel">รหัสสินค้า</label><input class="fInput" value="${p.id}" disabled></div>
+                    <div><label class="fLabel">รหัสสินค้า (หมวด: ${categoryNameOf(p.id)})</label><input class="fInput" value="${p.id}" disabled></div>
                     <div><label class="fLabel">ชื่อสินค้า</label><input class="fInput" id="eName" value="${p.name}"></div>
                 </div>
                 <div class="formRow">
@@ -1342,14 +1463,15 @@
             ${low.length?`<div class="alertBox">⚠️ มีสินค้า ${low.length} รายการที่ต้องสั่งเพิ่ม</div>`:''}
             <div class="card">
                 <div class="tableWrap"><table>
-                    <thead><tr><th>สินค้า</th><th>หน่วย</th><th>คงเหลือ</th><th>ขั้นต่ำ</th><th>สถานะ</th></tr></thead>
+                    <thead><tr><th>รหัส</th><th>สินค้า</th><th>หน่วย</th><th>คงเหลือ</th><th>ขั้นต่ำ</th><th>สถานะ</th></tr></thead>
                     <tbody>${scoped.length?scoped.map(p=>`
                         <tr>
+                            <td style="color:var(--muted);font-size:12px"><b>${p.id}</b></td>
                             <td><b>${p.name}</b></td><td>${p.unit}</td>
                             <td><span style="font-size:18px;font-weight:700;color:${p.stock<=p.minStock?'var(--red)':'var(--green)'}">${p.stock}</span></td>
                             <td>${p.minStock}</td>
                             <td>${p.stock<=p.minStock?'<span class="badge badge-low">⚠ ใกล้หมด</span>':'<span class="badge badge-approved">✓ เพียงพอ</span>'}</td>
-                        </tr>`).join(''):'<tr><td colspan="5"><div class="emptyState">ยังไม่มีสินค้าในสถานที่นี้</div></td></tr>'}
+                        </tr>`).join(''):'<tr><td colspan="6"><div class="emptyState">ยังไม่มีสินค้าในสถานที่นี้</div></td></tr>'}
                     </tbody>
                 </table></div>
             </div>`;
@@ -1365,18 +1487,21 @@
                 <div class="cardTitle">ฟอร์มรับสินค้าเข้า</div>
                 <div class="formRow">
                     <div><label class="fLabel">สินค้า</label>
-                        <select class="fSelect" id="inProduct">
+                        <select class="fSelect" id="inProduct" onchange="onInProductChange(this.value)">
                             <option value="">-- เลือกสินค้า --</option>
-                            ${scoped.map(p=>`<option value="${p.id}">${p.name} (${p.unit}) คงเหลือ: ${p.stock}</option>`).join('')}
+                            ${scoped.map(p=>`<option value="${p.id}">${p.id} - ${p.name} (${p.unit}) คงเหลือ: ${p.stock}</option>`).join('')}
                         </select>
                     </div>
                     <div><label class="fLabel">จำนวน</label><input class="fInput" type="number" id="inQty" min="1" value="1"></div>
                 </div>
                 <div class="formRow">
+                    <div><label class="fLabel">หน่วยนับที่รับเข้า</label>
+                        <select class="fSelect" id="inUnit">${UNITS.map(u=>`<option>${u}</option>`).join('')}</select>
+                    </div>
                     <div><label class="fLabel">วันที่/เวลา</label><input class="fInput" type="datetime-local" id="inDate" value="${nowDT()}"></div>
-                    <div><label class="fLabel">ผู้บันทึก</label><input class="fInput" id="inRecorder" value="${currentUser.name}" readonly></div>
                 </div>
-                <div class="formRow one">
+                <div class="formRow">
+                    <div><label class="fLabel">ผู้บันทึก</label><input class="fInput" id="inRecorder" value="${currentUser.name}" readonly></div>
                     <div><label class="fLabel">หมายเหตุ</label><input class="fInput" id="inNote" placeholder="หมายเหตุเพิ่มเติม (ถ้ามี)"></div>
                 </div>
                 <button class="btn btn-success" onclick="submitStockIn()">✓ บันทึกสินค้าเข้า</button>
@@ -1384,27 +1509,34 @@
             <div class="card">
                 <div class="cardTitle">รายการสินค้าเข้าล่าสุด (${currentLocation})</div>
                 <div class="tableWrap"><table>
-                    <thead><tr><th>สินค้า</th><th>จำนวน</th><th>วันที่/เวลา</th><th>ผู้บันทึก</th><th>หมายเหตุ</th></tr></thead>
+                    <thead><tr><th>รหัส</th><th>สินค้า</th><th>จำนวน</th><th>วันที่/เวลา</th><th>ผู้บันทึก</th><th>หมายเหตุ</th></tr></thead>
                     <tbody>${transactions.filter(t=>t.type==='IN'&&scoped.find(p=>p.id===t.productId)).slice(-10).reverse().map(t=>{
                         const p=products.find(x=>x.id===t.productId);
-                        return `<tr><td>${p?p.name:t.productId}</td><td><span class="badge badge-in">+${t.qty} ${p?p.unit:''}</span></td><td>${fmtDT(t.dateTime)}</td><td>${t.recorder}</td><td style="color:var(--muted);font-size:12px">${t.note||'-'}</td></tr>`;
-                    }).join('')||'<tr><td colspan="5"><div class="emptyState">ยังไม่มีการบันทึก</div></td></tr>'}</tbody>
+                        return `<tr><td style="color:var(--muted);font-size:12px"><b>${t.productId}</b></td><td>${p?p.name:t.productId}</td><td><span class="badge badge-in">+${t.qty} ${t.unit||(p?p.unit:'')}</span></td><td>${fmtDT(t.dateTime)}</td><td>${t.recorder}</td><td style="color:var(--muted);font-size:12px">${t.note||'-'}</td></tr>`;
+                    }).join('')||'<tr><td colspan="6"><div class="emptyState">ยังไม่มีการบันทึก</div></td></tr>'}</tbody>
                 </table></div>
             </div>`;
+        }
+
+        function onInProductChange(pid) {
+            const p = products.find(x=>x.id===pid);
+            const unitSel = document.getElementById('inUnit');
+            if (p && unitSel) unitSel.value = UNITS.includes(p.unit) ? p.unit : unitSel.value;
         }
 
         function submitStockIn() {
             const pid  = document.getElementById('inProduct').value;
             const qty  = parseInt(document.getElementById('inQty').value)||0;
+            const unit = document.getElementById('inUnit').value;
             const dt   = document.getElementById('inDate').value;
             const note = document.getElementById('inNote').value;
             if (!pid){ alert('กรุณาเลือกสินค้า'); return; }
             if (qty<=0){ alert('กรุณากรอกจำนวนที่ถูกต้อง'); return; }
             const p = products.find(x=>x.id===pid);
             p.stock += qty;
-            transactions.push({id:'T'+Date.now(),productId:pid,type:'IN',qty,dateTime:dt,recorder:currentUser.name,note});
+            transactions.push({id:'T'+Date.now(),productId:pid,type:'IN',qty,unit,dateTime:dt,recorder:currentUser.name,note});
             saveProducts(); saveTransactions();
-            alert(`✓ บันทึกสินค้าเข้า: ${p.name} ${qty} ${p.unit} สำเร็จ`);
+            alert(`✓ บันทึกสินค้าเข้า: ${p.id} - ${p.name} ${qty} ${unit} สำเร็จ`);
             showPage('stockIn');
         }
 
@@ -1418,21 +1550,26 @@
                 <div class="cardTitle">ฟอร์มสินค้าออก</div>
                 <div class="formRow">
                     <div><label class="fLabel">สินค้า</label>
-                        <select class="fSelect" id="outProduct">
+                        <select class="fSelect" id="outProduct" onchange="onOutProductChange(this.value)">
                             <option value="">-- เลือกสินค้า --</option>
-                            ${scoped.map(p=>`<option value="${p.id}">${p.name} (${p.unit}) คงเหลือ: ${p.stock}</option>`).join('')}
+                            ${scoped.map(p=>`<option value="${p.id}">${p.id} - ${p.name} (${p.unit}) คงเหลือ: ${p.stock}</option>`).join('')}
                         </select>
                     </div>
                     <div><label class="fLabel">จำนวน</label><input class="fInput" type="number" id="outQty" min="1" value="1"></div>
                 </div>
                 <div class="formRow">
+                    <div><label class="fLabel">หน่วยนับที่เบิกออก</label>
+                        <select class="fSelect" id="outUnit">${UNITS.map(u=>`<option>${u}</option>`).join('')}</select>
+                    </div>
                     <div><label class="fLabel">เบิกไปที่ (ปลายทาง)</label>
                         <select class="fSelect" id="outDestination">${DESTINATIONS.map(d=>`<option>${d}</option>`).join('')}</select>
                     </div>
-                    <div><label class="fLabel">วันที่/เวลา</label><input class="fInput" type="datetime-local" id="outDate" value="${nowDT()}"></div>
                 </div>
                 <div class="formRow">
+                    <div><label class="fLabel">วันที่/เวลา</label><input class="fInput" type="datetime-local" id="outDate" value="${nowDT()}"></div>
                     <div><label class="fLabel">ผู้บันทึก</label><input class="fInput" id="outRecorder" value="${currentUser.name}" readonly></div>
+                </div>
+                <div class="formRow one">
                     <div><label class="fLabel">หมายเหตุ/วัตถุประสงค์</label><input class="fInput" id="outNote" placeholder="ใช้สำหรับ..."></div>
                 </div>
                 <button class="btn btn-danger" onclick="submitStockOut()">− บันทึกสินค้าออก</button>
@@ -1440,32 +1577,40 @@
             <div class="card">
                 <div class="cardTitle">รายการสินค้าออกล่าสุด (${currentLocation})</div>
                 <div class="tableWrap"><table>
-                    <thead><tr><th>สินค้า</th><th>จำนวน</th><th>ปลายทาง</th><th>วันที่/เวลา</th><th>ผู้บันทึก</th><th>หมายเหตุ</th></tr></thead>
+                    <thead><tr><th>รหัสรายการ</th><th>สินค้า</th><th>จำนวน</th><th>ปลายทาง</th><th>วันที่/เวลา</th><th>ผู้บันทึก</th><th>หมายเหตุ</th></tr></thead>
                     <tbody>${transactions.filter(t=>t.type==='OUT'&&scoped.find(p=>p.id===t.productId)).slice(-10).reverse().map(t=>{
                         const p=products.find(x=>x.id===t.productId);
-                        return `<tr><td>${p?p.name:t.productId}</td><td><span class="badge badge-out">-${t.qty} ${p?p.unit:''}</span></td><td>${t.destination?`<span class="badge badge-loc">${t.destination}</span>`:'-'}</td><td>${fmtDT(t.dateTime)}</td><td>${t.recorder}</td><td style="color:var(--muted);font-size:12px">${t.note||'-'}</td></tr>`;
-                    }).join('')||'<tr><td colspan="6"><div class="emptyState">ยังไม่มีการบันทึก</div></td></tr>'}</tbody>
+                        return `<tr><td style="color:var(--muted);font-size:12px"><b>${t.itemCode||'-'}</b></td><td>${p?p.name:t.productId}</td><td><span class="badge badge-out">-${t.qty} ${t.unit||(p?p.unit:'')}</span></td><td>${t.destination?`<span class="badge badge-loc">${t.destination}</span>`:'-'}</td><td>${fmtDT(t.dateTime)}</td><td>${t.recorder}</td><td style="color:var(--muted);font-size:12px">${t.note||'-'}</td></tr>`;
+                    }).join('')||'<tr><td colspan="7"><div class="emptyState">ยังไม่มีการบันทึก</div></td></tr>'}</tbody>
                 </table></div>
             </div>`;
+        }
+
+        function onOutProductChange(pid) {
+            const p = products.find(x=>x.id===pid);
+            const unitSel = document.getElementById('outUnit');
+            if (p && unitSel) unitSel.value = UNITS.includes(p.unit) ? p.unit : unitSel.value;
         }
 
         function submitStockOut() {
             const pid         = document.getElementById('outProduct').value;
             const qty         = parseInt(document.getElementById('outQty').value)||0;
+            const unit        = document.getElementById('outUnit').value;
             const destination = document.getElementById('outDestination').value;
             const dt          = document.getElementById('outDate').value;
             const note        = document.getElementById('outNote').value;
             if (!pid){ alert('กรุณาเลือกสินค้า'); return; }
             if (qty<=0){ alert('กรุณากรอกจำนวนที่ถูกต้อง'); return; }
             const p = products.find(x=>x.id===pid);
-            if (p.stock - qty < 1){
-                alert(`ไม่สามารถเบิกได้! สต๊อกต้องเหลืออย่างน้อย 1 ${p.unit} เสมอ (ปัจจุบันมี ${p.stock} ${p.unit})`);
+            if (p.stock - qty < 0){
+                alert(`ไม่สามารถเบิกได้! สต๊อกไม่พอ (ปัจจุบันมี ${p.stock} ${p.unit})`);
                 return;
             }
             p.stock -= qty;
-            transactions.push({id:'T'+Date.now(),productId:pid,type:'OUT',qty,destination,dateTime:dt,recorder:currentUser.name,note});
+            const itemCode = `${p.id}-${DEST_CODES[destination]||'00'}`;
+            transactions.push({id:'T'+Date.now(),productId:pid,type:'OUT',qty,unit,destination,itemCode,dateTime:dt,recorder:currentUser.name,note});
             saveProducts(); saveTransactions();
-            alert(`✓ บันทึกสินค้าออก: ${p.name} ${qty} ${p.unit} ไปที่ ${destination} สำเร็จ`);
+            alert(`✓ บันทึกสินค้าออก: ${p.id} - ${p.name} ${qty} ${unit} ไปที่ ${destination} สำเร็จ (รหัสรายการ: ${itemCode})`);
             showPage('stockOut');
         }
 
@@ -1492,14 +1637,16 @@
             const sorted = [...list].sort((a,b)=>new Date(b.dateTime)-new Date(a.dateTime));
             if (!sorted.length) return '<div class="emptyState">ไม่พบข้อมูล</div>';
             return `<div class="tableWrap"><table>
-                <thead><tr><th>ประเภท</th><th>สินค้า</th><th>สถานที่</th><th>จำนวน</th><th>ปลายทาง</th><th>วันที่/เวลา</th><th>ผู้บันทึก</th><th>หมายเหตุ</th></tr></thead>
+                <thead><tr><th>ประเภท</th><th>รหัสสินค้า</th><th>รหัสรายการ</th><th>สินค้า</th><th>สถานที่</th><th>จำนวน</th><th>ปลายทาง</th><th>วันที่/เวลา</th><th>ผู้บันทึก</th><th>หมายเหตุ</th></tr></thead>
                 <tbody>${sorted.map(t=>{
                     const p=products.find(x=>x.id===t.productId);
                     return `<tr>
                         <td>${t.type==='IN'?'<span class="badge badge-in">▲ เข้า</span>':'<span class="badge badge-out">▼ ออก</span>'}</td>
+                        <td style="color:var(--muted);font-size:12px"><b>${t.productId}</b></td>
+                        <td style="color:var(--muted);font-size:12px"><b>${t.itemCode||'-'}</b></td>
                         <td>${p?p.name:t.productId}</td>
                         <td>${p?`<span class="badge badge-loc">${p.location}</span>`:'-'}</td>
-                        <td>${t.qty} ${p?p.unit:''}</td>
+                        <td>${t.qty} ${t.unit||(p?p.unit:'')}</td>
                         <td>${t.destination||'-'}</td>
                         <td>${fmtDT(t.dateTime)}</td>
                         <td>${t.recorder}</td>
@@ -1562,8 +1709,9 @@
                             <span class="badge ${r.status==='pending'?'badge-pending':r.status==='approved'?'badge-approved':'badge-rejected'}" style="margin-left:8px">
                                 ${r.status==='pending'?'รอดำเนินการ':r.status==='approved'?'อนุมัติแล้ว':'ปฏิเสธ'}
                             </span>
+                            <span style="font-size:11px;color:var(--muted);margin-left:8px">${r.refCode||''}</span>
                             <div style="font-size:12px;color:var(--muted);margin-top:4px">
-                                ${fmtDT(r.createdAt)} | วัตถุประสงค์: ${r.purpose}
+                                ${fmtDT(r.createdAt)} | วัตถุประสงค์: ${r.purpose} | ปลายทาง: ${r.destination||'-'}
                                 ${r.groupName ? '| คณะ: '+r.groupName : ''}
                             </div>
                         </div>
@@ -1576,8 +1724,9 @@
                         <div style="font-size:12px;font-weight:700;color:var(--muted);margin-bottom:6px">รายการสินค้า:</div>
                         ${r.items.map(item=>{
                             const p=products.find(x=>x.id===item.productId);
+                            const code = item.productId+'-'+(DEST_CODES[r.destination]||'00');
                             return `<span style="display:inline-block;background:var(--cream);border:1px solid var(--border);border-radius:6px;padding:3px 10px;margin:2px;font-size:13px">
-                                ${p?p.name:item.productId} × ${item.qty} ${p?p.unit:''} ${p?`<span style="color:var(--muted)">(${p.location})</span>`:''}
+                                <b style="color:var(--muted);font-size:11px">${code}</b> ${p?p.name:item.productId} × ${item.qty} ${p?p.unit:''} ${p?`<span style="color:var(--muted)">(${p.location})</span>`:''}
                             </span>`;
                         }).join('')}
                     </div>
@@ -1589,15 +1738,17 @@
             const errors = [];
             for (const item of r.items) {
                 const p = products.find(x=>x.id===item.productId);
-                if (!p || (p.stock - item.qty) < 1) errors.push(`${p?p.name:item.productId} ไม่พอ (มี ${p?p.stock:0}, ต้องเหลืออย่างน้อย 1 หน่วยเสมอ)`);
+                if (!p || (p.stock - item.qty) < 0) errors.push(`${p?p.name:item.productId} ไม่พอ (มี ${p?p.stock:0})`);
             }
             if (errors.length){ alert('ไม่สามารถอนุมัติได้:\n'+errors.join('\n')); return; }
             for (const item of r.items) {
                 const p = products.find(x=>x.id===item.productId);
                 p.stock -= item.qty;
+                const itemCode = `${p.id}-${DEST_CODES[r.destination]||'00'}`;
                 transactions.push({
                     id:'T'+Date.now()+Math.random(), productId:item.productId, type:'OUT',
-                    qty:item.qty, destination:r.groupName?r.groupName:(r.purpose||'-'), dateTime:new Date().toISOString(),
+                    qty:item.qty, unit:p.unit, destination:r.destination||(r.groupName?r.groupName:(r.purpose||'-')),
+                    itemCode, refCode:r.refCode, dateTime:new Date().toISOString(),
                     recorder:currentUser.name, note:`อนุมัติเบิก: ${r.requester} | ${r.purpose}`
                 });
             }
@@ -1620,13 +1771,14 @@
             ${locationSwitcher()}
             <div class="card">
                 <div class="tableWrap"><table>
-                    <thead><tr><th>สินค้า</th><th>หน่วย</th><th>คงเหลือ</th><th>สถานะ</th></tr></thead>
+                    <thead><tr><th>รหัส</th><th>สินค้า</th><th>หน่วย</th><th>คงเหลือ</th><th>สถานะ</th></tr></thead>
                     <tbody>${scoped.length?scoped.map(p=>`
                         <tr>
+                            <td style="color:var(--muted);font-size:12px"><b>${p.id}</b></td>
                             <td><b>${p.name}</b></td><td>${p.unit}</td>
                             <td><span style="font-size:17px;font-weight:700;color:${p.stock<=p.minStock?'var(--red)':'var(--green)'}">${p.stock}</span></td>
                             <td>${p.stock<=0?'<span class="badge badge-rejected">หมด</span>':p.stock<=p.minStock?'<span class="badge badge-low">⚠ น้อย</span>':'<span class="badge badge-approved">✓ มีพอ</span>'}</td>
-                        </tr>`).join(''):'<tr><td colspan="4"><div class="emptyState">ยังไม่มีสินค้าในสถานที่นี้</div></td></tr>'}
+                        </tr>`).join(''):'<tr><td colspan="5"><div class="emptyState">ยังไม่มีสินค้าในสถานที่นี้</div></td></tr>'}
                     </tbody>
                 </table></div>
             </div>`;
@@ -1678,7 +1830,7 @@
                     <div style="flex:2"><label class="fLabel">สินค้า</label>
                         <select class="fSelect" onchange="reqItems[${i}].productId=this.value">
                             <option value="">-- เลือกสินค้า --</option>
-                            ${scoped.map(p=>`<option value="${p.id}" ${item.productId===p.id?'selected':''}>${p.name} (คงเหลือ: ${p.stock} ${p.unit})</option>`).join('')}
+                            ${scoped.map(p=>`<option value="${p.id}" ${item.productId===p.id?'selected':''}>${p.id} - ${p.name} (คงเหลือ: ${p.stock} ${p.unit})</option>`).join('')}
                         </select>
                     </div>
                     <div style="flex:1"><label class="fLabel">จำนวน</label>
@@ -1703,8 +1855,8 @@
             if (!validItems.length){ alert('กรุณาเลือกสินค้าอย่างน้อย 1 รายการ'); return; }
             for (const item of validItems) {
                 const p = products.find(x=>x.id===item.productId);
-                if (p && (p.stock - item.qty) < 1){
-                    alert(`${p.name} มีไม่พอสำหรับคำขอนี้ (คงเหลือ ${p.stock} ${p.unit} ต้องเหลืออย่างน้อย 1 ${p.unit} เสมอ)`);
+                if (p && (p.stock - item.qty) < 0){
+                    alert(`${p.name} มีไม่พอสำหรับคำขอนี้ (คงเหลือ ${p.stock} ${p.unit})`);
                     return;
                 }
             }
@@ -1714,15 +1866,16 @@
             const hasGroup = document.getElementById('hasGroup').checked;
             const groupName= hasGroup ? document.getElementById('groupName').value.trim() : '';
             const tourNum  = hasGroup ? document.getElementById('tourNum').value.trim()   : '';
+            const refCode = genRefCode('O', DEST_CODES[destination]);
             const req = {
-                id:'REQ'+Date.now(), requester:currentUser.name, requesterId:currentUser.id,
+                id:'REQ'+Date.now(), refCode, requester:currentUser.name, requesterId:currentUser.id,
                 items:validItems, purpose, destination,
                 groupName: groupName+(tourNum?'('+tourNum+')':''),
                 status:'pending', createdAt:new Date().toISOString()
             };
             requests.push(req);
             saveRequests();
-            alert('✓ ส่งคำขอเบิกสินค้าเรียบร้อยแล้ว รอการอนุมัติจากผู้ดูแลระบบ');
+            alert(`✓ ส่งคำขอเบิกสินค้าเรียบร้อยแล้ว รหัสอ้างอิง: ${refCode}\nรอการอนุมัติจากผู้ดูแลระบบ`);
             showPage('myHistory');
         }
 
@@ -1738,12 +1891,14 @@
                         <span class="badge ${r.status==='pending'?'badge-pending':r.status==='approved'?'badge-approved':'badge-rejected'}">
                             ${r.status==='pending'?'รอดำเนินการ':r.status==='approved'?'✓ อนุมัติแล้ว':'✗ ไม่อนุมัติ'}
                         </span>
+                        <span style="font-size:11px;color:var(--muted)">${r.refCode||''}</span>
                         <span style="font-size:12px;color:var(--muted)">${fmtDT(r.createdAt)} | ${r.purpose} ${r.destination?'| ไปที่: '+r.destination:''} ${r.groupName?'| คณะ: '+r.groupName:''}</span>
                     </div>
                     <div style="margin-top:10px;border-top:1px solid var(--border);padding-top:8px">
                         ${r.items.map(item=>{
                             const p=products.find(x=>x.id===item.productId);
-                            return `<span style="display:inline-block;background:var(--cream);border:1px solid var(--border);border-radius:6px;padding:3px 10px;margin:2px;font-size:13px">${p?p.name:item.productId} × ${item.qty} ${p?p.unit:''}</span>`;
+                            const code = item.productId+'-'+(DEST_CODES[r.destination]||'00');
+                            return `<span style="display:inline-block;background:var(--cream);border:1px solid var(--border);border-radius:6px;padding:3px 10px;margin:2px;font-size:13px"><b style="color:var(--muted);font-size:11px">${code}</b> ${p?p.name:item.productId} × ${item.qty} ${p?p.unit:''}</span>`;
                         }).join('')}
                     </div>
                 </div>`).join('')}`;
@@ -1755,7 +1910,8 @@
             poItems = [{name:'',qty:1,unit:UNITS[0]}];
             el.innerHTML = `
             <div class="pageTitle">ใบสั่งสินค้า</div>
-            <div class="pageSub">สำหรับหัวหน้างานแต่ละแผนกสั่งซื้อสินค้าเพิ่มเติม (พนักงานทั่วไปไม่มีสิทธิ์ใช้งานหน้านี้)</div>
+            <div class="pageSub">สำหรับหัวหน้างานแต่ละแผนกสั่งซื้อสินค้าเพิ่มเติม (พนักงานทั่วไปไม่มีสิทธิ์ใช้งานหน้านี้) — สถานที่: <b>${currentLocation}</b></div>
+            ${locationSwitcher()}
             <div class="card">
                 <div class="cardTitle">ข้อมูลผู้ขอสั่งสินค้า</div>
                 <div class="formRow">
@@ -1807,23 +1963,27 @@
             if (!validItems.length){ alert('กรุณากรอกรายการสินค้าอย่างน้อย 1 รายการ'); return; }
             const needDate = document.getElementById('poDate').value;
             if (!needDate){ alert('กรุณาระบุวันที่ต้องการให้สั่งของ'); return; }
+            const poCode  = genPoCode(currentLocation);
+            const refCode = genRefCode('P', DEST_CODES[currentLocation]);
             purchaseOrders.push({
-                id:'PO'+Date.now(), requesterId:currentUser.id, requester:currentUser.name,
-                position:currentUser.position, dept:currentUser.dept,
+                id:'PO'+Date.now(), poCode, refCode, requesterId:currentUser.id, requester:currentUser.name,
+                position:currentUser.position, location:currentLocation,
                 items:validItems, needDate, createdAt:new Date().toISOString()
             });
             savePurchaseOrders();
-            alert('✓ ส่งใบสั่งสินค้าเรียบร้อยแล้ว');
+            alert(`✓ ส่งใบสั่งสินค้าเรียบร้อยแล้ว\nรหัสใบสั่ง: ${poCode}\nรหัสอ้างอิง: ${refCode}`);
             showPage('purchaseOrder');
         }
 
         function renderPoTable() {
-            const sorted = [...purchaseOrders].sort((a,b)=>new Date(b.createdAt)-new Date(a.createdAt));
-            if (!sorted.length) return '<div class="emptyState">ยังไม่มีใบสั่งสินค้า</div>';
+            const sorted = [...purchaseOrders].filter(o=>o.location===currentLocation).sort((a,b)=>new Date(b.createdAt)-new Date(a.createdAt));
+            if (!sorted.length) return '<div class="emptyState">ยังไม่มีใบสั่งสินค้าในสถานที่นี้</div>';
             return `<table>
-                <thead><tr><th>ผู้ขอสั่ง</th><th>ตำแหน่ง</th><th>รายการสินค้า</th><th>ต้องการภายในวันที่</th><th>วันที่ส่งคำขอ</th></tr></thead>
+                <thead><tr><th>รหัสใบสั่ง</th><th>รหัสอ้างอิง</th><th>ผู้ขอสั่ง</th><th>ตำแหน่ง</th><th>รายการสินค้า</th><th>ต้องการภายในวันที่</th><th>วันที่ส่งคำขอ</th></tr></thead>
                 <tbody>${sorted.map(o=>`
                     <tr>
+                        <td><b>${o.poCode||'-'}</b></td>
+                        <td style="font-size:11px;color:var(--muted)">${o.refCode||'-'}</td>
                         <td>${o.requester}</td><td>${o.position}</td>
                         <td>${o.items.map(it=>`<span style="display:inline-block;background:var(--cream);border:1px solid var(--border);border-radius:6px;padding:2px 8px;margin:2px;font-size:12px">${it.name} × ${it.qty} ${it.unit}</span>`).join('')}</td>
                         <td>${o.needDate}</td>
